@@ -93,10 +93,8 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
         name: z.string().describe("Short descriptive name for the session, e.g. 'auth-fix'"),
         working_dir: z.string().describe("Absolute path to the directory to work in"),
         initial_prompt: z.string().optional().describe("Optional initial prompt to send to the worker"),
-        model: z.string().optional().describe("Optional model override for the worker session"),
+        model: z.string().optional().describe("Model to use for the worker session"),
         skill_directories: z.array(z.string()).optional().describe("Optional array of skill directory paths to load into the worker session"),
-        custom_agents: z.array(z.any()).optional().describe("Optional array of custom agent manifests to load into the worker"),
-        agent: z.string().optional().describe("Optional agent role label for the worker session"),
       }),
       handler: async (args) => {
         if (deps.workers.has(args.name)) {
@@ -178,11 +176,8 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
         }
 
         const sessionModel = args.model || config.copilotModel;
-        const availableCustomAgents = args.custom_agents && Array.isArray(args.custom_agents) && args.custom_agents.length
-          ? args.custom_agents
-          : customAgents;
-        const matchedAgent = selectCustomAgent(args.agent, availableCustomAgents as NamedAgent[]);
-        const workerAgent = matchedAgent?.displayName || matchedAgent?.name || args.agent || "default";
+        const availableCustomAgents = customAgents;
+        const workerAgent = "orchestrator"
         const createdAt = Date.now();
 
         const session = await deps.client.createSession({
@@ -191,6 +186,7 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
           workingDirectory: args.working_dir,
           skillDirectories: skillDirs.length ? skillDirs : undefined,
           customAgents: availableCustomAgents,
+          agent: workerAgent,
           onPermissionRequest: approveAll,
         });
 
