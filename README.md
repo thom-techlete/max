@@ -59,6 +59,7 @@ From Telegram or the TUI, just send natural language:
 | Command | Description |
 |---------|-------------|
 | `max start` | Start the Max daemon |
+| `max sessions` | List active worker sessions from the daemon |
 | `max tui` | Connect to the daemon via terminal |
 | `max setup` | Interactive first-run configuration |
 | `max update` | Check for and install updates |
@@ -86,6 +87,16 @@ From Telegram or the TUI, just send natural language:
 | `/help` | Show help |
 | `/quit` | Exit the TUI |
 | `Escape` | Cancel a running response |
+
+### Inspect active worker sessions
+
+Use the main CLI when you want a quick snapshot without opening the TUI:
+
+```bash
+max sessions
+```
+
+The command queries the local daemon and prints a compact table with each active worker's name, current status, and working directory.
 
 ## How it Works
 

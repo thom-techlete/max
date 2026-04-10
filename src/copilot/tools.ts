@@ -2,7 +2,7 @@ import { z } from "zod";
 import { approveAll, defineTool, type CopilotClient, type CopilotSession, type Tool } from "@github/copilot-sdk";
 import { getDb, addMemory, searchMemories, removeMemory } from "../store/db.js";
 import { readdirSync, readFileSync, statSync } from "fs";
-import { join, sep, resolve } from "path";
+import { join, sep, resolve, dirname } from "path";
 import { homedir } from "os";
 import { listSkills, createSkill, removeSkill } from "./skills.js";
 import { config, persistModel } from "../config.js";
@@ -89,43 +89,64 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
           return `Worker limit reached (${MAX_CONCURRENT_WORKERS}). Active: ${names}. Kill a session first.`;
         }
 
-        const globalAgentsBase = join(homedir(), ".copilot", "agents");
-        const requiredAgents = ["orchestrator", "coder", "designer", "planner"];
         const skillDirs: string[] = Array.isArray(args.skill_directories) ? [...args.skill_directories] : [];
-        for (const a of requiredAgents) {
-          const p = join(globalAgentsBase, a);
-          try {
-            if (statSync(p).isDirectory() && !skillDirs.includes(p)) skillDirs.push(p);
-          } catch {
-            // ignore missing agent dir
-          }
-        }
 
-        // Build customAgents from available global agent dirs or fall back to sensible defaults
-        const customAgents: any[] = [];
-        for (const a of requiredAgents) {
-          const agentDir = join(globalAgentsBase, a);
+        // Load agents from agents/ folder in the working directory or parent directories
+        let agentsFolderPath: string | null = null;
+        let current = resolvedDir;
+        while (current !== sep) {
+          const potentialPath = join(current, "agents");
           try {
-            // Prefer an agent.json manifest with explicit fields
-            const jsonPath = join(agentDir, "agent.json");
-            try {
-              const raw = readFileSync(jsonPath, "utf-8");
-              const parsed = JSON.parse(raw);
-              // Ensure name field exists
-              if (parsed.name) {
-                customAgents.push(parsed);
-                continue;
-              }
-            } catch {
-              // fallthrough to defaults
+            if (statSync(potentialPath).isDirectory()) {
+              agentsFolderPath = potentialPath;
+              break;
             }
           } catch {}
+          current = dirname(current);
+        }
 
-          // Fallback defaults for agents
-          const nice = a.charAt(0).toUpperCase() + a.slice(1);
-          const defaultDesc = `${nice} agent: specialized for ${a === 'orchestrator' ? 'coordinating work across specialists' : a + ' tasks' }.`;
-          const defaultPrompt = `You are the ${nice} agent. Assist with ${a === 'orchestrator' ? 'orchestration and delegation' : a + ' responsibilities'}. Follow instructions concisely and act as the ${nice} specialist.`;
-          customAgents.push({ name: a, description: defaultDesc, prompt: defaultPrompt, infer: true });
+        // Load all agents from agents/ by reading their agent.json files
+        const customAgents: any[] = [];
+        if (agentsFolderPath) {
+          try {
+            const agentDirs = readdirSync(agentsFolderPath);
+            for (const agentFile of agentDirs) {
+              const agentPath = join(agentsFolderPath, agentFile);
+              try {
+                // Handle both agent directories and agent.json files
+                const stat = statSync(agentPath);
+                let jsonPath: string | null = null;
+
+                if (stat.isDirectory()) {
+                  // Look for agent.json inside the directory
+                  jsonPath = join(agentPath, "agent.json");
+                } else if (agentFile.endsWith(".agent.json")) {
+                  // Direct agent.json file
+                  jsonPath = agentPath;
+                }
+
+                if (jsonPath) {
+                  try {
+                    const raw = readFileSync(jsonPath, "utf-8");
+                    const parsed = JSON.parse(raw);
+                    if (parsed.name) {
+                      customAgents.push(parsed);
+                      // Add agent dir to skillDirs if it's a directory
+                      if (stat.isDirectory() && !skillDirs.includes(agentPath)) {
+                        skillDirs.push(agentPath);
+                      }
+                    }
+                  } catch {
+                    // Skip invalid JSON files
+                  }
+                }
+              } catch {
+                // Skip unreadable files
+              }
+            }
+          } catch {
+            // agents/ exists but can't be read
+          }
         }
 
         const session = await deps.client.createSession({
@@ -134,7 +155,6 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
           workingDirectory: args.working_dir,
           skillDirectories: skillDirs.length ? skillDirs : undefined,
           customAgents: args.custom_agents && Array.isArray(args.custom_agents) && args.custom_agents.length ? args.custom_agents : customAgents,
-          agent: args.agent || "orchestrator",
           onPermissionRequest: approveAll,
         });
 
