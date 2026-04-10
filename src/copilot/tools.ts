@@ -40,6 +40,30 @@ function logWorker(message: string): void {
   console.log(`[max][worker] ${message}`);
 }
 
+function tryLoadCustomAgent(jsonPath: string, customAgents: any[], skillDirs: string[]): void {
+  try {
+    const raw = readFileSync(jsonPath, "utf-8");
+    const parsed = JSON.parse(raw);
+    if (parsed.name) {
+      customAgents.push(parsed);
+      const dir = dirname(jsonPath);
+      if (!skillDirs.includes(dir)) {
+        skillDirs.push(dir);
+      }
+    }
+  } catch {
+    // Ignore invalid agent definitions
+  }
+}
+
+function selectCustomAgent(agentName: string, customAgents: any[]): any | undefined {
+  const wanted = agentName.trim().toLowerCase();
+  return customAgents.find((agent) =>
+    String(agent.name || "").toLowerCase() === wanted ||
+    String(agent.displayName || "").toLowerCase() === wanted
+  );
+}
+
 const BLOCKED_WORKER_DIRS = [
   ".ssh", ".gnupg", ".aws", ".azure", ".config/gcloud",
   ".kube", ".docker", ".npmrc", ".pypirc",
@@ -126,68 +150,68 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
           current = dirname(current);
         }
 
-        // Load all agents from agents/ by reading their agent.json files
+        // Load custom agents from any discovered agents folders and from provided skill directories.
         const customAgents: any[] = [];
-        if (agentsFolderPath) {
-          logWorker(`found agents folder at ${agentsFolderPath}`);
+        const agentSearchPaths = new Set<string>();
+        if (agentsFolderPath) agentSearchPaths.add(agentsFolderPath);
+        for (const dir of skillDirs) {
+          agentSearchPaths.add(dir);
+        }
+
+        for (const root of agentSearchPaths) {
           try {
-            const agentDirs = readdirSync(agentsFolderPath);
-            for (const agentFile of agentDirs) {
-              const agentPath = join(agentsFolderPath, agentFile);
+            const stat = statSync(root);
+            if (!stat.isDirectory()) continue;
+
+            const rootAgentJson = join(root, "agent.json");
+            tryLoadCustomAgent(rootAgentJson, customAgents, skillDirs);
+
+            const entries = readdirSync(root);
+            for (const entry of entries) {
+              const entryPath = join(root, entry);
               try {
-                // Handle both agent directories and agent.json files
-                const stat = statSync(agentPath);
-                let jsonPath: string | null = null;
-
-                if (stat.isDirectory()) {
-                  // Look for agent.json inside the directory
-                  jsonPath = join(agentPath, "agent.json");
-                } else if (agentFile.endsWith(".agent.json")) {
-                  // Direct agent.json file
-                  jsonPath = agentPath;
-                }
-
-                if (jsonPath) {
-                  try {
-                    const raw = readFileSync(jsonPath, "utf-8");
-                    const parsed = JSON.parse(raw);
-                    if (parsed.name) {
-                      customAgents.push(parsed);
-                      // Add agent dir to skillDirs if it's a directory
-                      if (stat.isDirectory() && !skillDirs.includes(agentPath)) {
-                        skillDirs.push(agentPath);
-                      }
-                    }
-                  } catch {
-                    // Skip invalid JSON files
-                  }
+                const entryStat = statSync(entryPath);
+                if (entryStat.isDirectory()) {
+                  tryLoadCustomAgent(join(entryPath, "agent.json"), customAgents, skillDirs);
+                } else if (entry.endsWith(".agent.json")) {
+                  tryLoadCustomAgent(entryPath, customAgents, skillDirs);
                 }
               } catch {
-                // Skip unreadable files
+                // Skip bad entry
               }
             }
           } catch {
-            // agents/ exists but can't be read
+            // Skip unreadable agent search roots
           }
         }
 
+        if (agentsFolderPath) {
+          logWorker(`found agents folder at ${agentsFolderPath}`);
+        }
+        logWorker(`discovered customAgents=${customAgents.length}`);
+
         const sessionModel = args.model || config.copilotModel;
         const availableCustomAgents = customAgents;
-        const workerAgent = "orchestrator"
+        const orchestratorAgent = selectCustomAgent("orchestrator", availableCustomAgents);
+        const workerAgent = orchestratorAgent ? "orchestrator" : availableCustomAgents.length > 0 ? "custom" : "default";
         const createdAt = Date.now();
 
-        logWorker(`creating session: model=${sessionModel}, workingDirectory=${args.working_dir}, skillDirectories=${skillDirs.length}, customAgents=${availableCustomAgents.length}, agent=${workerAgent}`);
+        const sessionOptions: any = {
+          model: sessionModel,
+          configDir: SESSIONS_DIR,
+          workingDirectory: args.working_dir,
+          skillDirectories: skillDirs.length ? skillDirs : undefined,
+          customAgents: availableCustomAgents.length ? availableCustomAgents : undefined,
+          onPermissionRequest: approveAll,
+        };
+        if (orchestratorAgent) {
+          sessionOptions.agent = "orchestrator";
+        }
+
+        logWorker(`creating session: model=${sessionModel}, workingDirectory=${args.working_dir}, skillDirectories=${skillDirs.length}, customAgents=${availableCustomAgents.length}, agent=${sessionOptions.agent ?? "(default)"}`);
         let session: CopilotSession;
         try {
-          session = await deps.client.createSession({
-            model: sessionModel,
-            configDir: SESSIONS_DIR,
-            workingDirectory: args.working_dir,
-            skillDirectories: skillDirs.length ? skillDirs : undefined,
-            customAgents: availableCustomAgents,
-            agent: workerAgent,
-            onPermissionRequest: approveAll,
-          });
+          session = await deps.client.createSession(sessionOptions);
           logWorker(`create_session succeeded: ${session.sessionId}`);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -243,7 +267,7 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
             deps.onWorkerComplete(args.name, errMsg);
           }).finally(() => {
             // Auto-destroy background workers after completion to free memory (~400MB per worker)
-            session.destroy().catch(() => {});
+            session.disconnect().catch(() => {});
             deps.workers.delete(args.name);
             getDb().prepare(`DELETE FROM worker_sessions WHERE name = ?`).run(args.name);
           });
