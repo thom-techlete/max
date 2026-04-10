@@ -1,5 +1,11 @@
 import { z } from "zod";
-import { approveAll, defineTool, type CopilotClient, type CopilotSession, type Tool } from "@github/copilot-sdk";
+import {
+  approveAll,
+  defineTool,
+  type CopilotClient,
+  type CopilotSession,
+  type Tool,
+} from "@github/copilot-sdk";
 import { getDb, addMemory, searchMemories, removeMemory } from "../store/db.js";
 import { readdirSync, readFileSync, statSync } from "fs";
 import { join, sep, resolve, dirname } from "path";
@@ -9,6 +15,7 @@ import { config, persistModel } from "../config.js";
 import { SESSIONS_DIR } from "../paths.js";
 import { getCurrentSourceChannel, switchSessionModel } from "./orchestrator.js";
 import { getRouterConfig, updateRouterConfig } from "./router.js";
+import { formatSessionsOutput, toWorkerSessionSummary } from "../worker-sessions.js";
 import { ensureWikiStructure, readPage, writePage, deletePage, listPages, writeRawSource, listSources, getWikiDir } from "../wiki/fs.js";
 import { searchIndex, addToIndex, removeFromIndex, parseIndex, type IndexEntry } from "../wiki/index-manager.js";
 import { appendLog } from "../wiki/log-manager.js";
@@ -41,7 +48,12 @@ export interface WorkerInfo {
   session: CopilotSession;
   workingDir: string;
   status: "idle" | "running" | "error";
+  model: string;
+  agent: string;
   lastOutput?: string;
+  currentTask?: string;
+  createdAt: number;
+  lastActivityAt: number;
   /** Timestamp (ms) when the worker started its current task. */
   startedAt?: number;
   /** Channel that created this worker — completions route back here. */
@@ -52,6 +64,22 @@ export interface ToolDeps {
   client: CopilotClient;
   workers: Map<string, WorkerInfo>;
   onWorkerComplete: (name: string, result: string) => void;
+}
+
+type NamedAgent = {
+  name?: string;
+  displayName?: string;
+};
+
+function selectCustomAgent(agentName: string | undefined, customAgents: NamedAgent[]): NamedAgent | undefined {
+  if (!agentName) {
+    return undefined;
+  }
+
+  const wanted = agentName.trim().toLowerCase();
+  return customAgents.find((agent) =>
+    agent.name?.toLowerCase() === wanted || agent.displayName?.toLowerCase() === wanted
+  );
 }
 
 export function createTools(deps: ToolDeps): Tool<any>[] {
@@ -68,7 +96,7 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
         model: z.string().optional().describe("Optional model override for the worker session"),
         skill_directories: z.array(z.string()).optional().describe("Optional array of skill directory paths to load into the worker session"),
         custom_agents: z.array(z.any()).optional().describe("Optional array of custom agent manifests to load into the worker"),
-        agent: z.string().optional().describe("Optional agent role to use for the session, e.g. 'orchestrator'"),
+        agent: z.string().optional().describe("Optional agent role label for the worker session"),
       }),
       handler: async (args) => {
         if (deps.workers.has(args.name)) {
@@ -149,12 +177,20 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
           }
         }
 
+        const sessionModel = args.model || config.copilotModel;
+        const availableCustomAgents = args.custom_agents && Array.isArray(args.custom_agents) && args.custom_agents.length
+          ? args.custom_agents
+          : customAgents;
+        const matchedAgent = selectCustomAgent(args.agent, availableCustomAgents as NamedAgent[]);
+        const workerAgent = matchedAgent?.displayName || matchedAgent?.name || args.agent || "default";
+        const createdAt = Date.now();
+
         const session = await deps.client.createSession({
-          model: args.model || config.copilotModel,
+          model: sessionModel,
           configDir: SESSIONS_DIR,
           workingDirectory: args.working_dir,
           skillDirectories: skillDirs.length ? skillDirs : undefined,
-          customAgents: args.custom_agents && Array.isArray(args.custom_agents) && args.custom_agents.length ? args.custom_agents : customAgents,
+          customAgents: availableCustomAgents,
           onPermissionRequest: approveAll,
         });
 
@@ -163,6 +199,10 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
           session,
           workingDir: args.working_dir,
           status: "idle",
+          model: sessionModel,
+          agent: workerAgent,
+          createdAt,
+          lastActivityAt: createdAt,
           originChannel: getCurrentSourceChannel(),
         };
         deps.workers.set(args.name, worker);
@@ -177,6 +217,8 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
         if (args.initial_prompt) {
           worker.status = "running";
           worker.startedAt = Date.now();
+          worker.lastActivityAt = worker.startedAt;
+          worker.currentTask = args.initial_prompt;
           db.prepare(
             `UPDATE worker_sessions SET status = 'running', updated_at = CURRENT_TIMESTAMP WHERE name = ?`
           ).run(args.name);
@@ -228,6 +270,8 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
 
         worker.status = "running";
         worker.startedAt = Date.now();
+        worker.lastActivityAt = worker.startedAt;
+        worker.currentTask = args.prompt;
         const db = getDb();
         db.prepare(`UPDATE worker_sessions SET status = 'running', updated_at = CURRENT_TIMESTAMP WHERE name = ?`).run(
           args.name
@@ -254,16 +298,17 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
     }),
 
     defineTool("list_sessions", {
-      description: "List all active worker sessions with their name, status, and working directory.",
+      description:
+        "List all active worker sessions with their name, status, working directory, model, role, timing, and current task.",
       parameters: z.object({}),
       handler: async () => {
         if (deps.workers.size === 0) {
           return "No active worker sessions.";
         }
-        const lines = Array.from(deps.workers.values()).map(
-          (w) => `• ${w.name} (${w.workingDir}) — ${w.status}`
-        );
-        return `Active sessions:\n${lines.join("\n")}`;
+        return formatSessionsOutput(
+          Array.from(deps.workers.values()).map((worker) => toWorkerSessionSummary(worker)),
+          "plain"
+        ).trimEnd();
       },
     }),
 
@@ -277,10 +322,11 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
         if (!worker) {
           return `No worker named '${args.name}'.`;
         }
+        const summary = formatSessionsOutput([toWorkerSessionSummary(worker)], "plain").trimEnd();
         const output = worker.lastOutput
           ? `\n\nLast output:\n${worker.lastOutput.slice(0, 2000)}`
           : "";
-        return `Worker '${args.name}'\nDirectory: ${worker.workingDir}\nStatus: ${worker.status}${output}`;
+        return `${summary}${output}`;
       },
     }),
 
@@ -391,6 +437,10 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
             session,
             workingDir: "(attached)",
             status: "idle",
+            model: config.copilotModel,
+            agent: "attached",
+            createdAt: Date.now(),
+            lastActivityAt: Date.now(),
             originChannel: getCurrentSourceChannel(),
           };
           deps.workers.set(args.name, worker);

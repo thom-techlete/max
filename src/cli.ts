@@ -24,7 +24,7 @@ Usage:
 
 Commands:
   start       Start the Max daemon (Telegram bot + HTTP API)
-  sessions    List active worker sessions from the daemon
+  sessions    Show detailed active worker sessions from the daemon
   tui         Connect to the daemon via terminal UI
   setup       Interactive first-run configuration
   update      Check for updates and install the latest version
@@ -35,7 +35,7 @@ Flags (start):
 
 Examples:
   max start           Start the daemon
-  max sessions        Show active worker sessions
+  max sessions        Show detailed active worker sessions
   max start --self-edit  Start with self-edit enabled
   max tui             Open the terminal client
   max setup           Configure Telegram token and settings

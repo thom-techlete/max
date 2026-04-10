@@ -29,19 +29,59 @@ function createMockResponse(body: unknown, init?: { ok?: boolean; status?: numbe
 
 test("buildHelpText includes the sessions command", () => {
   const help = buildHelpText("1.2.3");
-  assert.match(help, /sessions\s+List active worker sessions from the daemon/);
-  assert.match(help, /max sessions\s+Show active worker sessions/);
+  assert.match(help, /sessions\s+Show detailed active worker sessions from the daemon/);
+  assert.match(help, /max sessions\s+Show detailed active worker sessions/);
 });
 
-test("formatSessionsOutput renders a concise session table", () => {
+test("formatSessionsOutput renders detailed worker session blocks", () => {
   const output = formatSessionsOutput([
-    { name: "docs-fix", status: "idle", workingDir: "/repo/docs" },
-    { name: "auth-refactor", status: "running", workingDir: "/repo/app" },
+    {
+      name: "docs-fix",
+      status: "idle",
+      workingDir: "/repo/docs",
+      model: "gpt-5.4",
+      agent: "default",
+      startedAt: "2026-04-10 11:00:00 UTC",
+      lastActivityAt: "2026-04-10 11:01:00 UTC",
+      currentTask: "Waiting for prompt",
+    },
+    {
+      name: "auth-refactor",
+      status: "running",
+      workingDir: "/repo/app",
+      model: "claude-sonnet-4.6",
+      agent: "coder",
+      startedAt: "2026-04-10 11:02:00 UTC",
+      lastActivityAt: "2026-04-10 11:03:00 UTC",
+      currentTask: "Fix the auth flow",
+    },
   ]);
 
-  assert.match(output, /NAME\s+STATUS\s+WORKING DIRECTORY/);
-  assert.match(output, /docs-fix\s+idle\s+\/repo\/docs/);
-  assert.match(output, /auth-refactor\s+running\s+\/repo\/app/);
+  assert.match(output, /Active worker sessions \(2\):/);
+  assert.match(output, /docs-fix/);
+  assert.match(output, /Working directory: \/repo\/docs/);
+  assert.match(output, /Model: claude-sonnet-4\.6/);
+  assert.match(output, /Agent\/role: coder/);
+  assert.match(output, /Current task: Fix the auth flow/);
+});
+
+test("formatSessionsOutput renders Telegram-friendly session blocks", () => {
+  const output = formatSessionsOutput([
+    {
+      name: "docs-fix",
+      status: "running",
+      workingDir: "/repo/docs",
+      model: "gpt-5.4",
+      agent: "designer",
+      startedAt: "2026-04-10 11:00:00 UTC",
+      lastActivityAt: "2026-04-10 11:01:00 UTC",
+      currentTask: "Polish the landing page",
+    },
+  ], "telegram");
+
+  assert.match(output, /\*\*docs-fix\*\*/);
+  assert.match(output, /Working directory: `\/repo\/docs`/);
+  assert.match(output, /Agent\/role: designer/);
 });
 
 test("runSessionsCommand prints active sessions and sends the API token", async () => {
@@ -58,7 +98,16 @@ test("runSessionsCommand prints active sessions and sends the API token", async 
     fetchImpl: async (_input, init) => {
       authorizationHeader = init?.headers?.Authorization || "";
       return createMockResponse([
-        { name: "lint-pass", status: "running", workingDir: "/repo" },
+        {
+          name: "lint-pass",
+          status: "running",
+          workingDir: "/repo",
+          model: "gpt-5.4",
+          agent: "coder",
+          startedAt: "2026-04-10 11:00:00 UTC",
+          lastActivityAt: "2026-04-10 11:01:00 UTC",
+          currentTask: "Run lint and fix failures",
+        },
       ]);
     },
   });
@@ -66,7 +115,9 @@ test("runSessionsCommand prints active sessions and sends the API token", async 
   assert.equal(exitCode, 0);
   assert.equal(stderr.join(""), "");
   assert.equal(authorizationHeader, "Bearer secret-token");
-  assert.match(stdout.join(""), /lint-pass\s+running\s+\/repo/);
+  assert.match(stdout.join(""), /lint-pass/);
+  assert.match(stdout.join(""), /Model: gpt-5\.4/);
+  assert.match(stdout.join(""), /Current task: Run lint and fix failures/);
 });
 
 test("runSessionsCommand prints the empty state", async () => {

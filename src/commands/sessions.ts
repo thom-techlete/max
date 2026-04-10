@@ -1,10 +1,8 @@
 import { readFileSync } from "fs";
+import { formatSessionsOutput, type WorkerSessionSummary } from "../worker-sessions.js";
 
-export interface WorkerSessionSummary {
-  name: string;
-  status: string;
-  workingDir: string;
-}
+export type { WorkerSessionSummary } from "../worker-sessions.js";
+export { formatSessionsOutput } from "../worker-sessions.js";
 
 type FetchLike = (
   input: string | URL,
@@ -41,27 +39,16 @@ function isWorkerSessionSummary(value: unknown): value is WorkerSessionSummary {
   const session = value as Record<string, unknown>;
   return typeof session.name === "string"
     && typeof session.status === "string"
-    && typeof session.workingDir === "string";
+    && typeof session.workingDir === "string"
+    && typeof session.model === "string"
+    && typeof session.agent === "string"
+    && typeof session.startedAt === "string"
+    && typeof session.lastActivityAt === "string"
+    && typeof session.currentTask === "string";
 }
 
 function isWorkerSessionSummaryList(value: unknown): value is WorkerSessionSummary[] {
   return Array.isArray(value) && value.every(isWorkerSessionSummary);
-}
-
-export function formatSessionsOutput(sessions: WorkerSessionSummary[]): string {
-  if (sessions.length === 0) {
-    return "No active worker sessions.\n";
-  }
-
-  const nameWidth = Math.max("NAME".length, ...sessions.map((session) => session.name.length));
-  const statusWidth = Math.max("STATUS".length, ...sessions.map((session) => session.status.length));
-  const header = `${"NAME".padEnd(nameWidth)}  ${"STATUS".padEnd(statusWidth)}  WORKING DIRECTORY`;
-  const divider = `${"-".repeat(nameWidth)}  ${"-".repeat(statusWidth)}  -----------------`;
-  const rows = sessions.map((session) =>
-    `${session.name.padEnd(nameWidth)}  ${session.status.padEnd(statusWidth)}  ${session.workingDir}`
-  );
-
-  return `${[header, divider, ...rows].join("\n")}\n`;
 }
 
 export async function fetchActiveSessions(

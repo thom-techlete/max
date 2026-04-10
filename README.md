@@ -59,7 +59,7 @@ From Telegram or the TUI, just send natural language:
 | Command | Description |
 |---------|-------------|
 | `max start` | Start the Max daemon |
-| `max sessions` | List active worker sessions from the daemon |
+| `max sessions` | Show detailed active worker sessions from the daemon |
 | `max tui` | Connect to the daemon via terminal |
 | `max setup` | Interactive first-run configuration |
 | `max update` | Check for and install updates |
@@ -78,7 +78,7 @@ From Telegram or the TUI, just send natural language:
 | `/model [name]` | Show or switch the current model |
 | `/memory` | Show stored memories |
 | `/skills` | List installed skills |
-| `/workers` | List active worker sessions |
+| `/workers` | Show detailed active worker sessions |
 | `/copy` | Copy last response to clipboard |
 | `/status` | Daemon health check |
 | `/restart` | Restart the daemon |
@@ -96,7 +96,7 @@ Use the main CLI when you want a quick snapshot without opening the TUI:
 max sessions
 ```
 
-The command queries the local daemon and prints a compact table with each active worker's name, current status, and working directory.
+The command queries the local daemon and prints a detailed block for each active worker, including its name, status, working directory, model, agent/role, start time, last activity, and current task or prompt.
 
 ## How it Works
 

@@ -3,6 +3,7 @@ import * as http from "http";
 import { exec, execFile } from "child_process";
 import { readFileSync, writeFileSync, appendFileSync, existsSync } from "fs";
 import { HISTORY_PATH, API_TOKEN_PATH, TUI_DEBUG_LOG_PATH, ensureMaxHome } from "../paths.js";
+import { formatSessionsOutput, type WorkerSessionSummary } from "../worker-sessions.js";
 
 const API_BASE = process.env.MAX_API_URL || "http://127.0.0.1:7777";
 
@@ -732,15 +733,11 @@ function sendCancel(): void {
 
 // ── Command handlers ──────────────────────────────────────
 function cmdWorkers(): void {
-  apiGet("/sessions", (sessions: any[]) => {
+  apiGet("/sessions", (sessions: WorkerSessionSummary[]) => {
     if (!sessions || sessions.length === 0) {
       console.log(C.dim("  No active worker sessions.\n"));
     } else {
-      for (const s of sessions) {
-        const badge = s.status === "idle" ? C.green("● idle") : C.yellow("● busy");
-        console.log(`  ${badge}  ${C.bold(s.name)}  ${C.dim(s.workingDir)}`);
-      }
-      console.log();
+      console.log(formatSessionsOutput(sessions));
     }
   });
 }
@@ -884,7 +881,7 @@ function cmdHelp(): void {
   console.log(`    ${C.coral("/auto")}                 toggle auto model routing`);
   console.log(`    ${C.coral("/memory")}               show stored memories`);
   console.log(`    ${C.coral("/skills")}               list installed skills`);
-  console.log(`    ${C.coral("/workers")}              list active sessions`);
+  console.log(`    ${C.coral("/workers")}              show detailed active sessions`);
   console.log(`    ${C.coral("/copy")}                 copy last response`);
   console.log(`    ${C.coral("/status")}               daemon health check`);
   console.log(`    ${C.coral("/restart")}              restart daemon`);
