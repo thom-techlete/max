@@ -17,6 +17,12 @@ export const SKILLS_DIR = join(MAX_HOME, "skills");
 /** Path to Max's isolated session state (keeps CLI history clean) */
 export const SESSIONS_DIR = join(MAX_HOME, "sessions");
 
+/** Path to persisted Copilot session event logs */
+export const SESSION_LOGS_DIR = join(MAX_HOME, "session-logs");
+
+/** Path to the current active orchestrator run-id */
+export const ACTIVE_SESSION_RUN_ID_PATH = join(SESSION_LOGS_DIR, "current-run-id");
+
 /** Path to TUI readline history */
 export const HISTORY_PATH = join(MAX_HOME, "tui_history");
 
@@ -38,4 +44,10 @@ export const WIKI_SOURCES_DIR = join(WIKI_DIR, "sources");
 /** Ensure ~/.max/ exists */
 export function ensureMaxHome(): void {
   mkdirSync(MAX_HOME, { recursive: true });
+}
+
+/** Ensure ~/.max/session-logs/ exists */
+export function ensureSessionLogsDir(): void {
+  ensureMaxHome();
+  mkdirSync(SESSION_LOGS_DIR, { recursive: true });
 }

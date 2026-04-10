@@ -7,6 +7,8 @@ import { listSkills } from "../copilot/skills.js";
 import { restartDaemon } from "../daemon.js";
 import { getRouterConfig, updateRouterConfig } from "../copilot/router.js";
 import { formatSessionsOutput, toWorkerSessionSummary } from "../worker-sessions.js";
+import { sendLocalTelegramMessage } from "../api/local-client.js";
+import { buildSessionTailMessage } from "./session-tail.js";
 import { tmpdir } from "os";
 import { join } from "path";
 import { writeFile, unlink } from "fs/promises";
@@ -121,6 +123,7 @@ export function createBot(): Bot {
         "/auto — Toggle auto model routing\n" +
         "/memory — Show stored memories\n" +
         "/skills — List installed skills\n" +
+        "/session-tail <run-id> [N] — Show recent session log lines\n" +
         "/workers — Show detailed active worker sessions\n" +
         "/restart — Restart Max\n" +
         "/help — Show this help"
@@ -203,6 +206,18 @@ export function createBot(): Bot {
         ctx,
         formatSessionsOutput(workers.map((worker) => toWorkerSessionSummary(worker)), "telegram")
       );
+    }
+  });
+  bot.command("session-tail", async (ctx) => {
+    const args = ctx.match?.trim() ?? "";
+    const [runId = "", requestedLines] = args.split(/\s+/, 2);
+    const text = buildSessionTailMessage(runId, requestedLines);
+
+    try {
+      await sendLocalTelegramMessage(text);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await ctx.reply(`Failed to deliver session tail: ${msg}`);
     }
   });
   bot.command("restart", async (ctx) => {
@@ -415,7 +430,18 @@ export async function stopBot(): Promise<void> {
 
 /** Send an unsolicited message to the authorized user (for background task completions). */
 export async function sendProactiveMessage(text: string): Promise<void> {
-  if (!bot || config.authorizedUserId === undefined) return;
+  try {
+    await sendTextMessage(text);
+  } catch {
+    // Bot may not be connected yet
+  }
+}
+
+export async function sendTextMessage(text: string): Promise<void> {
+  if (!bot || config.authorizedUserId === undefined) {
+    throw new Error("Telegram bot is not available.");
+  }
+
   const formatted = toTelegramMarkdown(text);
   const chunks = chunkMessage(formatted);
   const fallbackChunks = chunkMessage(text);
@@ -426,7 +452,7 @@ export async function sendProactiveMessage(text: string): Promise<void> {
       try {
         await bot.api.sendMessage(config.authorizedUserId, fallbackChunks[i] ?? chunks[i]);
       } catch {
-        // Bot may not be connected yet
+        throw new Error("Telegram bot could not send the message.");
       }
     }
   }

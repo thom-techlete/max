@@ -19,6 +19,7 @@ import { formatSessionsOutput, toWorkerSessionSummary } from "../worker-sessions
 import { ensureWikiStructure, readPage, writePage, deletePage, listPages, writeRawSource, listSources, getWikiDir } from "../wiki/fs.js";
 import { searchIndex, addToIndex, removeFromIndex, parseIndex, type IndexEntry } from "../wiki/index-manager.js";
 import { appendLog } from "../wiki/log-manager.js";
+import { attachSessionLog } from "../logging/session-log.js";
 
 function isTimeoutError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
@@ -213,6 +214,10 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
         try {
           session = await deps.client.createSession(sessionOptions);
           logWorker(`create_session succeeded: ${session.sessionId}`);
+          attachSessionLog(session, {
+            agentName: args.name,
+            agentType: workerAgent,
+          });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           logWorker(`create_session failed: ${msg}`);
@@ -465,6 +470,10 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
             onPermissionRequest: approveAll,
           });
           logWorker(`attach_machine_session succeeded: name=${args.name}, session_id=${args.session_id}`);
+          attachSessionLog(session, {
+            agentName: args.name,
+            agentType: "attached",
+          });
 
           const worker: WorkerInfo = {
             name: args.name,

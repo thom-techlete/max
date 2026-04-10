@@ -1,7 +1,12 @@
 import { config as loadEnv } from "dotenv";
 import { z } from "zod";
-import { readFileSync, writeFileSync } from "fs";
-import { ENV_PATH, ensureMaxHome } from "./paths.js";
+import { existsSync, readFileSync, writeFileSync } from "fs";
+import {
+  ACTIVE_SESSION_RUN_ID_PATH,
+  ENV_PATH,
+  ensureMaxHome,
+  ensureSessionLogsDir,
+} from "./paths.js";
 
 // Load from ~/.max/.env, fall back to cwd .env for dev
 loadEnv({ path: ENV_PATH, quiet: true });
@@ -59,6 +64,9 @@ export const config = {
   get selfEditEnabled(): boolean {
     return process.env.MAX_SELF_EDIT === "1";
   },
+  get activeSessionRunId(): string | undefined {
+    return readActiveSessionRunId();
+  },
 };
 
 /** Update or append an env var in ~/.max/.env */
@@ -86,4 +94,24 @@ function persistEnvVar(key: string, value: string): void {
 /** Persist the current model choice to ~/.max/.env */
 export function persistModel(model: string): void {
   persistEnvVar("COPILOT_MODEL", model);
+}
+
+export function persistActiveSessionRunId(runId: string): void {
+  ensureSessionLogsDir();
+  process.env.MAX_ACTIVE_SESSION_RUN_ID = runId;
+  writeFileSync(ACTIVE_SESSION_RUN_ID_PATH, `${runId}\n`);
+}
+
+export function readActiveSessionRunId(): string | undefined {
+  const fromEnv = process.env.MAX_ACTIVE_SESSION_RUN_ID?.trim();
+  if (fromEnv) {
+    return fromEnv;
+  }
+
+  if (!existsSync(ACTIVE_SESSION_RUN_ID_PATH)) {
+    return undefined;
+  }
+
+  const fromFile = readFileSync(ACTIVE_SESSION_RUN_ID_PATH, "utf-8").trim();
+  return fromFile || undefined;
 }

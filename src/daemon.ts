@@ -8,6 +8,7 @@ import { spawn } from "child_process";
 import { checkForUpdate } from "./update.js";
 import { ensureWikiStructure } from "./wiki/fs.js";
 import { shouldMigrate, migrateMemoriesToWiki } from "./wiki/migrate.js";
+import { getSessionLogPath } from "./logging/session-log.js";
 
 function truncate(text: string, max = 200): string {
   const oneLine = text.replace(/\n/g, " ").trim();
@@ -51,6 +52,10 @@ async function main(): Promise<void> {
   console.log("[max] Creating orchestrator session...");
   await initOrchestrator(client);
   console.log("[max] Orchestrator session ready");
+  if (config.activeSessionRunId) {
+    console.log(`[max] Active run-id: ${config.activeSessionRunId}`);
+    console.log(`[max] Session log: ${getSessionLogPath(config.activeSessionRunId)}`);
+  }
 
   // Wire up proactive notifications — route to the originating channel
   setProactiveNotify((text, channel) => {

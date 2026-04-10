@@ -25,6 +25,7 @@ Usage:
 Commands:
   start       Start the Max daemon (Telegram bot + HTTP API)
   sessions    Show detailed active worker sessions from the daemon
+  session-log-tail Show the latest persisted session log entries for a run
   tui         Connect to the daemon via terminal UI
   setup       Interactive first-run configuration
   update      Check for updates and install the latest version
@@ -36,6 +37,7 @@ Flags (start):
 Examples:
   max start           Start the daemon
   max sessions        Show detailed active worker sessions
+  max session-log-tail abc123 --lines 50  Show the last 50 persisted session log entries
   max start --self-edit  Start with self-edit enabled
   max tui             Open the terminal client
   max setup           Configure Telegram token and settings
@@ -69,6 +71,10 @@ export async function runCli(args = process.argv.slice(2)): Promise<number> {
         apiPort: config.apiPort,
         tokenPath: API_TOKEN_PATH,
       });
+    }
+    case "session-log-tail": {
+      const { runSessionLogTailCommand } = await import("./cli/session-log-tail-cmd.js");
+      return runSessionLogTailCommand(args.slice(1));
     }
     case "tui":
       await import("./tui/index.js");

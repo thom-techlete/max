@@ -9,6 +9,7 @@ import { logConversation, getState, setState, deleteState, getRecentConversation
 import { SESSIONS_DIR } from "../paths.js";
 import { resolveModel, type Tier, type RouteResult } from "./router.js";
 import { getRelevantWikiContext, getWikiSummary } from "../wiki/context.js";
+import { attachSessionLog } from "../logging/session-log.js";
 
 const MAX_RETRIES = 3;
 const RECONNECT_DELAYS_MS = [1_000, 3_000, 10_000];
@@ -190,6 +191,12 @@ async function createOrResumeSession(): Promise<CopilotSession> {
         onPermissionRequest: approveAll,
         infiniteSessions,
       });
+      const sessionLog = attachSessionLog(session, {
+        agentName: "orchestrator",
+        agentType: "orchestrator",
+        markActive: true,
+      });
+      console.log(`[max] Orchestrator run-id: ${sessionLog.runId}`);
       console.log(`[max] Resumed orchestrator session successfully`);
       currentSessionModel = config.copilotModel;
       return session;
@@ -214,10 +221,16 @@ async function createOrResumeSession(): Promise<CopilotSession> {
     onPermissionRequest: approveAll,
     infiniteSessions,
   });
+  const sessionLog = attachSessionLog(session, {
+    agentName: "orchestrator",
+    agentType: "orchestrator",
+    markActive: true,
+  });
 
   // Persist the session ID for future restarts
   setState(ORCHESTRATOR_SESSION_KEY, session.sessionId);
   console.log(`[max] Created orchestrator session ${session.sessionId.slice(0, 8)}…`);
+  console.log(`[max] Orchestrator run-id: ${sessionLog.runId}`);
 
   // Recover conversation context if available (session was lost, not first run)
   const recentHistory = getRecentConversation(30);
