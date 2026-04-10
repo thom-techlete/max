@@ -8,6 +8,9 @@ export const MAX_HOME = join(homedir(), ".max");
 /** Path to the SQLite database */
 export const DB_PATH = join(MAX_HOME, "max.db");
 
+/** Path to the dedicated scheduler SQLite database */
+export const SCHEDULER_DB_PATH = join(MAX_HOME, "scheduler.db");
+
 /** Path to the user .env file */
 export const ENV_PATH = join(MAX_HOME, ".env");
 

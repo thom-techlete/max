@@ -18,6 +18,8 @@ const configSchema = z.object({
   API_PORT: z.string().optional(),
   COPILOT_MODEL: z.string().optional(),
   WORKER_TIMEOUT: z.string().optional(),
+  SCHEDULER_POLL_INTERVAL: z.string().optional(),
+  SCHEDULER_MODEL_OVERRIDE: z.string().optional(),
 });
 
 const raw = configSchema.parse(process.env);
@@ -38,20 +40,30 @@ const DEFAULT_WORKER_TIMEOUT_MS = 600_000; // 10 minutes
 const parsedWorkerTimeout = raw.WORKER_TIMEOUT
   ? Number(raw.WORKER_TIMEOUT)
   : DEFAULT_WORKER_TIMEOUT_MS;
+const DEFAULT_SCHEDULER_POLL_INTERVAL_MS = 30_000; // 30 seconds
+const parsedSchedulerPollInterval = raw.SCHEDULER_POLL_INTERVAL
+  ? Number(raw.SCHEDULER_POLL_INTERVAL)
+  : DEFAULT_SCHEDULER_POLL_INTERVAL_MS;
 
 if (!Number.isInteger(parsedWorkerTimeout) || parsedWorkerTimeout <= 0) {
   throw new Error(`WORKER_TIMEOUT must be a positive integer (ms), got: "${raw.WORKER_TIMEOUT}"`);
+}
+if (!Number.isInteger(parsedSchedulerPollInterval) || parsedSchedulerPollInterval <= 0) {
+  throw new Error(`SCHEDULER_POLL_INTERVAL must be a positive integer (ms), got: "${raw.SCHEDULER_POLL_INTERVAL}"`);
 }
 
 export const DEFAULT_MODEL = "claude-sonnet-4.6";
 
 let _copilotModel = raw.COPILOT_MODEL || DEFAULT_MODEL;
+const schedulerModelOverride = raw.SCHEDULER_MODEL_OVERRIDE?.trim() || undefined;
 
 export const config = {
   telegramBotToken: raw.TELEGRAM_BOT_TOKEN,
   authorizedUserId: parsedUserId,
   apiPort: parsedPort,
   workerTimeoutMs: parsedWorkerTimeout,
+  schedulerPollIntervalMs: parsedSchedulerPollInterval,
+  schedulerModelOverride,
   get copilotModel(): string {
     return _copilotModel;
   },
