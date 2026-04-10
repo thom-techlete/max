@@ -3,16 +3,14 @@ import {
   approveAll,
   defineTool,
   type CopilotClient,
-  type CopilotSession,
   type Tool,
 } from "@github/copilot-sdk";
 import { getDb, addMemory, searchMemories, removeMemory } from "../store/db.js";
-import { readdirSync, readFileSync, statSync } from "fs";
-import { join, sep, resolve, dirname } from "path";
+import { readdirSync, readFileSync } from "fs";
+import { join } from "path";
 import { homedir } from "os";
 import { listSkills, createSkill, removeSkill } from "./skills.js";
 import { config, persistModel } from "../config.js";
-import { SESSIONS_DIR } from "../paths.js";
 import { getCurrentSourceChannel, switchSessionModel } from "./orchestrator.js";
 import { getRouterConfig, updateRouterConfig } from "./router.js";
 import { formatSessionsOutput, toWorkerSessionSummary } from "../worker-sessions.js";
@@ -20,85 +18,20 @@ import { ensureWikiStructure, readPage, writePage, deletePage, listPages, writeR
 import { searchIndex, addToIndex, removeFromIndex, parseIndex, type IndexEntry } from "../wiki/index-manager.js";
 import { appendLog } from "../wiki/log-manager.js";
 import { attachSessionLog } from "../logging/session-log.js";
+import {
+  createWorkerSession,
+  formatWorkerError,
+  logWorker,
+  type WorkerInfo,
+} from "./worker-helper.js";
 
-function isTimeoutError(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err);
-  return /timeout|timed?\s*out/i.test(msg);
-}
-
-function formatWorkerError(workerName: string, startedAt: number, timeoutMs: number, err: unknown): string {
-  const elapsed = Math.round((Date.now() - startedAt) / 1000);
-  const limit = Math.round(timeoutMs / 1000);
-  const msg = err instanceof Error ? err.message : String(err);
-
-  if (isTimeoutError(err)) {
-    return `Worker '${workerName}' timed out after ${elapsed}s (limit: ${limit}s). The task was still running but had to be stopped. To allow more time, set WORKER_TIMEOUT=${timeoutMs * 2} in ~/.max/.env`;
-  }
-  return `Worker '${workerName}' failed after ${elapsed}s: ${msg}`;
-}
-
-function logWorker(message: string): void {
-  console.log(`[max][worker] ${message}`);
-}
-
-function tryLoadCustomAgent(jsonPath: string, customAgents: any[], skillDirs: string[]): void {
-  try {
-    const raw = readFileSync(jsonPath, "utf-8");
-    const parsed = JSON.parse(raw);
-    if (parsed.name) {
-      customAgents.push(parsed);
-      const dir = dirname(jsonPath);
-      if (!skillDirs.includes(dir)) {
-        skillDirs.push(dir);
-      }
-    }
-  } catch {
-    // Ignore invalid agent definitions
-  }
-}
-
-function selectCustomAgent(agentName: string, customAgents: any[]): any | undefined {
-  const wanted = agentName.trim().toLowerCase();
-  return customAgents.find((agent) =>
-    String(agent.name || "").toLowerCase() === wanted ||
-    String(agent.displayName || "").toLowerCase() === wanted
-  );
-}
-
-const BLOCKED_WORKER_DIRS = [
-  ".ssh", ".gnupg", ".aws", ".azure", ".config/gcloud",
-  ".kube", ".docker", ".npmrc", ".pypirc",
-];
-
-const MAX_CONCURRENT_WORKERS = 5;
-
-export interface WorkerInfo {
-  name: string;
-  session: CopilotSession;
-  workingDir: string;
-  status: "idle" | "running" | "error";
-  model: string;
-  agent: string;
-  lastOutput?: string;
-  currentTask?: string;
-  createdAt: number;
-  lastActivityAt: number;
-  /** Timestamp (ms) when the worker started its current task. */
-  startedAt?: number;
-  /** Channel that created this worker — completions route back here. */
-  originChannel?: "telegram" | "tui";
-}
+export type { WorkerInfo } from "./worker-helper.js";
 
 export interface ToolDeps {
   client: CopilotClient;
   workers: Map<string, WorkerInfo>;
   onWorkerComplete: (name: string, result: string) => void;
 }
-
-type NamedAgent = {
-  name?: string;
-  displayName?: string;
-};
 
 export function createTools(deps: ToolDeps): Tool<any>[] {
   return [
@@ -116,171 +49,20 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
       }),
       handler: async (args) => {
         logWorker(`create_worker_session called: name=${args.name}, working_dir=${args.working_dir}, model=${args.model ?? "(default)"}, skill_directories=${Array.isArray(args.skill_directories) ? args.skill_directories.length : 0}, initial_prompt=${args.initial_prompt ? "yes" : "no"}`);
-        if (deps.workers.has(args.name)) {
-          return `Worker '${args.name}' already exists. Use send_to_worker to interact with it.`;
-        }
-
-        const home = homedir();
-        const resolvedDir = resolve(args.working_dir);
-        for (const blocked of BLOCKED_WORKER_DIRS) {
-          const blockedPath = join(home, blocked);
-          if (resolvedDir === blockedPath || resolvedDir.startsWith(blockedPath + sep)) {
-            return `Refused: '${args.working_dir}' is a sensitive directory. Workers cannot operate in ${blocked}.`;
-          }
-        }
-
-        if (deps.workers.size >= MAX_CONCURRENT_WORKERS) {
-          const names = Array.from(deps.workers.keys()).join(", ");
-          return `Worker limit reached (${MAX_CONCURRENT_WORKERS}). Active: ${names}. Kill a session first.`;
-        }
-
-        const skillDirs: string[] = Array.isArray(args.skill_directories) ? [...args.skill_directories] : [];
-        logWorker(`initial skillDirs count=${skillDirs.length}`);
-
-        // Load agents from agents/ folder in the working directory or parent directories
-        let agentsFolderPath: string | null = null;
-        let current = resolvedDir;
-        while (current !== sep) {
-          const potentialPath = join(current, "agents");
-          try {
-            if (statSync(potentialPath).isDirectory()) {
-              agentsFolderPath = potentialPath;
-              break;
-            }
-          } catch {}
-          current = dirname(current);
-        }
-
-        // Load custom agents from any discovered agents folders and from provided skill directories.
-        const customAgents: any[] = [];
-        const agentSearchPaths = new Set<string>();
-        if (agentsFolderPath) agentSearchPaths.add(agentsFolderPath);
-        for (const dir of skillDirs) {
-          agentSearchPaths.add(dir);
-        }
-
-        for (const root of agentSearchPaths) {
-          try {
-            const stat = statSync(root);
-            if (!stat.isDirectory()) continue;
-
-            const rootAgentJson = join(root, "agent.json");
-            tryLoadCustomAgent(rootAgentJson, customAgents, skillDirs);
-
-            const entries = readdirSync(root);
-            for (const entry of entries) {
-              const entryPath = join(root, entry);
-              try {
-                const entryStat = statSync(entryPath);
-                if (entryStat.isDirectory()) {
-                  tryLoadCustomAgent(join(entryPath, "agent.json"), customAgents, skillDirs);
-                } else if (entry.endsWith(".agent.json")) {
-                  tryLoadCustomAgent(entryPath, customAgents, skillDirs);
-                }
-              } catch {
-                // Skip bad entry
-              }
-            }
-          } catch {
-            // Skip unreadable agent search roots
-          }
-        }
-
-        if (agentsFolderPath) {
-          logWorker(`found agents folder at ${agentsFolderPath}`);
-        }
-        logWorker(`discovered customAgents=${customAgents.length}`);
-
-        const sessionModel = args.model || config.copilotModel;
-        const availableCustomAgents = customAgents;
-        const orchestratorAgent = selectCustomAgent("orchestrator", availableCustomAgents);
-        const workerAgent = orchestratorAgent ? "orchestrator" : availableCustomAgents.length > 0 ? "custom" : "default";
-        const createdAt = Date.now();
-
-        const sessionOptions: any = {
-          model: sessionModel,
-          configDir: SESSIONS_DIR,
-          workingDirectory: args.working_dir,
-          skillDirectories: skillDirs.length ? skillDirs : undefined,
-          customAgents: availableCustomAgents.length ? availableCustomAgents : undefined,
-          onPermissionRequest: approveAll,
-        };
-        if (orchestratorAgent) {
-          sessionOptions.agent = "orchestrator";
-        }
-
-        logWorker(`creating session: model=${sessionModel}, workingDirectory=${args.working_dir}, skillDirectories=${skillDirs.length}, customAgents=${availableCustomAgents.length}, agent=${sessionOptions.agent ?? "(default)"}`);
-        let session: CopilotSession;
-        try {
-          session = await deps.client.createSession(sessionOptions);
-          logWorker(`create_session succeeded: ${session.sessionId}`);
-          attachSessionLog(session, {
-            agentName: args.name,
-            agentType: workerAgent,
-          });
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          logWorker(`create_session failed: ${msg}`);
-          throw err;
-        }
-
-        const worker: WorkerInfo = {
+        const result = await createWorkerSession({
           name: args.name,
-          session,
           workingDir: args.working_dir,
-          status: "idle",
-          model: sessionModel,
-          agent: workerAgent,
-          createdAt,
-          lastActivityAt: createdAt,
+          initialPrompt: args.initial_prompt,
+          model: args.model,
+          skillDirectories: args.skill_directories,
+        }, {
+          client: deps.client,
+          workers: deps.workers,
+          onWorkerComplete: deps.onWorkerComplete,
           originChannel: getCurrentSourceChannel(),
-        };
-        deps.workers.set(args.name, worker);
-
-        // Persist to SQLite
-        const db = getDb();
-        db.prepare(
-          `INSERT OR REPLACE INTO worker_sessions (name, copilot_session_id, working_dir, status)
-           VALUES (?, ?, ?, 'idle')`
-        ).run(args.name, session.sessionId, args.working_dir);
-
-        if (args.initial_prompt) {
-          worker.status = "running";
-          worker.startedAt = Date.now();
-          worker.lastActivityAt = worker.startedAt;
-          worker.currentTask = args.initial_prompt;
-          db.prepare(
-            `UPDATE worker_sessions SET status = 'running', updated_at = CURRENT_TIMESTAMP WHERE name = ?`
-          ).run(args.name);
-
-          const timeoutMs = config.workerTimeoutMs;
-          // Non-blocking: dispatch work and return immediately
-          const promptPayload: any = { prompt: `Working directory: ${args.working_dir}\n\n${args.initial_prompt}` };
-          if (args.skill_directories && Array.isArray(args.skill_directories)) {
-            promptPayload.skillDirectories = args.skill_directories;
-          }
-          logWorker(`dispatching initial prompt to worker '${args.name}', timeoutMs=${timeoutMs}`);
-
-          session.sendAndWait(promptPayload, timeoutMs).then((result) => {
-            worker.lastOutput = result?.data?.content || "No response";
-            logWorker(`worker '${args.name}' completed initial prompt successfully`);
-            deps.onWorkerComplete(args.name, worker.lastOutput);
-          }).catch((err) => {
-            const errMsg = formatWorkerError(args.name, worker.startedAt!, timeoutMs, err);
-            worker.lastOutput = errMsg;
-            logWorker(`worker '${args.name}' failed initial prompt: ${errMsg}`);
-            deps.onWorkerComplete(args.name, errMsg);
-          }).finally(() => {
-            // Auto-destroy background workers after completion to free memory (~400MB per worker)
-            session.disconnect().catch(() => {});
-            deps.workers.delete(args.name);
-            getDb().prepare(`DELETE FROM worker_sessions WHERE name = ?`).run(args.name);
-          });
-
-          return `Worker '${args.name}' created in ${args.working_dir}. Task dispatched — I'll notify you when it's done.`;
-        }
-
-        return `Worker '${args.name}' created in ${args.working_dir}. Use send_to_worker to send it prompts.`;
+          logWorker,
+        });
+        return result.message;
       },
     }),
 
@@ -325,7 +107,10 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
           deps.onWorkerComplete(args.name, errMsg);
         }).finally(() => {
           // Auto-destroy after each send_to_worker dispatch to free memory
-          worker.session.destroy().catch(() => {});
+          void worker.session.destroy().catch((err) => {
+            const msg = err instanceof Error ? err.message : String(err);
+            logWorker(`worker '${args.name}' destroy failed: ${msg}`);
+          });
           deps.workers.delete(args.name);
           getDb().prepare(`DELETE FROM worker_sessions WHERE name = ?`).run(args.name);
         });
@@ -379,8 +164,9 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
         }
         try {
           await worker.session.destroy();
-        } catch {
-          // Session may already be gone
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          logWorker(`kill_session destroy failed for '${args.name}': ${msg}`);
         }
         deps.workers.delete(args.name);
 
