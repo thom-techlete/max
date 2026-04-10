@@ -6,11 +6,26 @@ import { searchMemories } from "../store/db.js";
 import { listSkills } from "../copilot/skills.js";
 import { restartDaemon } from "../daemon.js";
 import { getRouterConfig, updateRouterConfig } from "../copilot/router.js";
+import { formatSessionsOutput, toWorkerSessionSummary } from "../worker-sessions.js";
 import { tmpdir } from "os";
 import { join } from "path";
 import { writeFile, unlink } from "fs/promises";
 
 let bot: Bot | undefined;
+
+async function replyFormattedText(ctx: Context, text: string): Promise<void> {
+  const formatted = toTelegramMarkdown(text);
+  const chunks = chunkMessage(formatted);
+  const fallbackChunks = chunkMessage(text);
+
+  for (let i = 0; i < chunks.length; i++) {
+    try {
+      await ctx.reply(chunks[i], { parse_mode: "MarkdownV2" });
+    } catch {
+      await ctx.reply(fallbackChunks[i] ?? chunks[i]);
+    }
+  }
+}
 
 /** Download a Telegram photo (largest size) to a temp file and return the path. */
 async function downloadTelegramPhoto(
@@ -106,7 +121,7 @@ export function createBot(): Bot {
         "/auto — Toggle auto model routing\n" +
         "/memory — Show stored memories\n" +
         "/skills — List installed skills\n" +
-        "/workers — List active worker sessions\n" +
+        "/workers — Show detailed active worker sessions\n" +
         "/restart — Restart Max\n" +
         "/help — Show this help"
     )
@@ -184,8 +199,10 @@ export function createBot(): Bot {
     if (workers.length === 0) {
       await ctx.reply("No active worker sessions.");
     } else {
-      const lines = workers.map((w) => `• ${w.name} (${w.workingDir}) — ${w.status}`);
-      await ctx.reply(lines.join("\n"));
+      await replyFormattedText(
+        ctx,
+        formatSessionsOutput(workers.map((worker) => toWorkerSessionSummary(worker)), "telegram")
+      );
     }
   });
   bot.command("restart", async (ctx) => {

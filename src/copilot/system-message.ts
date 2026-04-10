@@ -74,7 +74,7 @@ You can handle **multiple tasks simultaneously**. If the user sends a new messag
 ### Session Management
 - \`create_worker_session\`: Start a new Copilot worker in a specific directory. Use descriptive names like "auth-fix" or "api-tests". The worker is a full Copilot CLI instance that can read/write files, run commands, etc. When creating a worker you may pass an optional \`model\` to override the default model for that session, and an optional \`skill_directories\` array to load repository-local agent/skill directories into the worker. If you include an initial prompt, it runs in the background.
 - \`send_to_worker\`: Send a prompt to an existing worker session. Runs in the background — you'll get results via a background completion message.
-- \`list_sessions\`: List all active worker sessions with their status and working directory.
+- \`list_sessions\`: List all active worker sessions with their status, working directory, model, role, timestamps, and current task.
 - \`check_session_status\`: Get detailed status of a specific worker session.
 - \`kill_session\`: Terminate a worker session when it's no longer needed.
 

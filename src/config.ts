@@ -4,8 +4,8 @@ import { readFileSync, writeFileSync } from "fs";
 import { ENV_PATH, ensureMaxHome } from "./paths.js";
 
 // Load from ~/.max/.env, fall back to cwd .env for dev
-loadEnv({ path: ENV_PATH });
-loadEnv(); // also check cwd for backwards compat
+loadEnv({ path: ENV_PATH, quiet: true });
+loadEnv({ quiet: true }); // also check cwd for backwards compat
 
 const configSchema = z.object({
   TELEGRAM_BOT_TOKEN: z.string().min(1).optional(),

@@ -10,6 +10,7 @@ import { searchMemories } from "../store/db.js";
 import { listSkills, removeSkill } from "../copilot/skills.js";
 import { restartDaemon } from "../daemon.js";
 import { API_TOKEN_PATH, ensureMaxHome } from "../paths.js";
+import { toWorkerSessionSummary } from "../worker-sessions.js";
 
 // Ensure token file exists (generate on first run)
 let apiToken: string | null = null;
@@ -57,12 +58,7 @@ app.get("/status", (_req: Request, res: Response) => {
 
 // List worker sessions
 app.get("/sessions", (_req: Request, res: Response) => {
-  const workers = Array.from(getWorkers().values()).map((w) => ({
-    name: w.name,
-    workingDir: w.workingDir,
-    status: w.status,
-    lastOutput: w.lastOutput?.slice(0, 500),
-  }));
+  const workers = Array.from(getWorkers().values()).map((w) => toWorkerSessionSummary(w));
   res.json(workers);
 });
 
