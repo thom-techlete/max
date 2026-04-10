@@ -308,6 +308,55 @@ export async function runDueSchedulesNow<TPayload extends SchedulePayload>(
   };
 }
 
+export async function runScheduleNow<TPayload extends SchedulePayload>(
+  id: string,
+  options: RunDueSchedulesOptions<TPayload> = {},
+): Promise<ScheduleRunRecord> {
+  const row = getScheduleRowById(id);
+  if (row.status !== "scheduled") {
+    throw new Error(`Schedule is not schedulable: ${id}`);
+  }
+
+  const evaluatedAt = options.now ?? new Date();
+  if (Number.isNaN(evaluatedAt.getTime())) {
+    throw new TypeError("options.now must be a valid Date.");
+  }
+
+  const evaluatedAtISO = evaluatedAt.toISOString();
+  const runId = randomUUID();
+  const claimed = claimManualScheduleRun(id, runId, evaluatedAtISO);
+  if (!claimed) {
+    throw new Error(`Schedule is already running: ${id}`);
+  }
+
+  const runner = options.runner ?? createWorkerScheduleRunner<TPayload>();
+  const schedule = getScheduleById<TPayload>(id);
+
+  let dispatchResult: ScheduleDispatchResult;
+  try {
+    dispatchResult = await runner(schedule, {
+      runId,
+      evaluatedAtISO,
+      scheduledForISO: evaluatedAtISO,
+    });
+  } catch (error) {
+    dispatchResult = {
+      status: "failed",
+      error: formatError(error),
+    };
+  }
+
+  finalizeScheduleRun(
+    row,
+    runId,
+    evaluatedAtISO,
+    normalizeDispatchResult(dispatchResult),
+    { preserveFutureNextRunAt: true },
+  );
+
+  return getScheduleRunById(runId);
+}
+
 function claimScheduleRun(
   scheduleId: string,
   runId: string,
@@ -357,11 +406,61 @@ function claimScheduleRun(
   return claim();
 }
 
+function claimManualScheduleRun(
+  scheduleId: string,
+  runId: string,
+  claimedAtISO: string,
+): boolean {
+  const db = getSchedulerDb();
+  const claim = db.transaction(() => {
+    const updateResult = db.prepare(`
+      UPDATE scheduled_tasks
+      SET active_run_id = ?,
+          updated_at = ?
+      WHERE id = ?
+        AND status = 'scheduled'
+        AND active_run_id IS NULL
+    `).run(runId, claimedAtISO, scheduleId);
+
+    if (updateResult.changes === 0) {
+      return false;
+    }
+
+    db.prepare(`
+      INSERT INTO scheduled_task_runs (
+        id,
+        task_id,
+        created_at,
+        scheduled_for,
+        started_at,
+        finished_at,
+        status,
+        error,
+        external_run_id,
+        runner_result_json
+      ) VALUES (?, ?, ?, ?, ?, NULL, 'running', NULL, NULL, NULL)
+    `).run(
+      runId,
+      scheduleId,
+      claimedAtISO,
+      claimedAtISO,
+      claimedAtISO,
+    );
+
+    return true;
+  });
+
+  return claim();
+}
+
 function finalizeScheduleRun(
   row: ScheduledTaskRow,
   runId: string,
   scheduledForISO: string,
   result: Required<Pick<ScheduleDispatchResult, "status" | "error" | "finishedAtISO">> & Pick<ScheduleDispatchResult, "externalRunId" | "result">,
+  options: {
+    preserveFutureNextRunAt?: boolean;
+  } = {},
 ): void {
   const db = getSchedulerDb();
   const finishedAtISO = result.finishedAtISO;
@@ -404,7 +503,11 @@ function finalizeScheduleRun(
         : row.schedule_type === "one_time"
         ? "completed"
         : "scheduled";
-      const storedNextRunAtISO = nextStatus === "scheduled" ? nextRunAtISO : null;
+      const storedNextRunAtISO = nextStatus !== "scheduled"
+        ? null
+        : options.preserveFutureNextRunAt && row.next_run_at && row.next_run_at > scheduledForISO
+        ? row.next_run_at
+        : nextRunAtISO;
 
       db.prepare(`
         UPDATE scheduled_tasks
@@ -462,7 +565,7 @@ function finalizeScheduleRun(
   finalize();
 }
 
-function getScheduleById<TPayload extends SchedulePayload>(id: string): ScheduleRecord<TPayload> {
+function getScheduleRowById(id: string): ScheduledTaskRow {
   const db = getSchedulerDb();
   const row = db.prepare(`
     SELECT
@@ -491,7 +594,11 @@ function getScheduleById<TPayload extends SchedulePayload>(id: string): Schedule
     throw new Error(`Schedule not found: ${id}`);
   }
 
-  return mapScheduleRow<TPayload>(row);
+  return row;
+}
+
+function getScheduleById<TPayload extends SchedulePayload>(id: string): ScheduleRecord<TPayload> {
+  return mapScheduleRow<TPayload>(getScheduleRowById(id));
 }
 
 function getScheduleRunById(id: string): ScheduleRunRecord {

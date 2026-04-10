@@ -24,6 +24,7 @@ Usage:
 
 Commands:
   start       Start the Max daemon (Telegram bot + HTTP API)
+  scheduler   Manage scheduled jobs via the daemon
   sessions    Show detailed active worker sessions from the daemon
   session-log-tail Show the latest persisted session log entries for a run
   tui         Connect to the daemon via terminal UI
@@ -36,6 +37,7 @@ Flags (start):
 
 Examples:
   max start           Start the daemon
+  max scheduler list  Show scheduled jobs
   max sessions        Show detailed active worker sessions
   max session-log-tail abc123 --lines 50  Show the last 50 persisted session log entries
   max start --self-edit  Start with self-edit enabled
@@ -68,6 +70,17 @@ export async function runCli(args = process.argv.slice(2)): Promise<number> {
         import("./paths.js"),
       ]);
       return runSessionsCommand({
+        apiPort: config.apiPort,
+        tokenPath: API_TOKEN_PATH,
+      });
+    }
+    case "scheduler": {
+      const { runSchedulerCommand } = await import("./commands/scheduler.js");
+      const [{ config }, { API_TOKEN_PATH }] = await Promise.all([
+        import("./config.js"),
+        import("./paths.js"),
+      ]);
+      return runSchedulerCommand(args.slice(1), {
         apiPort: config.apiPort,
         tokenPath: API_TOKEN_PATH,
       });

@@ -10,6 +10,15 @@ import { searchMemories } from "../store/db.js";
 import { listSkills, removeSkill } from "../copilot/skills.js";
 import { restartDaemon } from "../daemon.js";
 import { API_TOKEN_PATH, ensureMaxHome } from "../paths.js";
+import {
+  cancelSchedule,
+  listSchedules,
+  runDueSchedulesNow,
+  runScheduleNow,
+  scheduleOneTime,
+  scheduleRecurring,
+} from "../scheduler/index.js";
+import type { JsonValue } from "../scheduler/types.js";
 import { toWorkerSessionSummary } from "../worker-sessions.js";
 
 // Ensure token file exists (generate on first run)
@@ -60,6 +69,112 @@ app.get("/status", (_req: Request, res: Response) => {
 app.get("/sessions", (_req: Request, res: Response) => {
   const workers = Array.from(getWorkers().values()).map((w) => toWorkerSessionSummary(w));
   res.json(workers);
+});
+
+// List schedules
+app.get("/schedules", (_req: Request, res: Response) => {
+  try {
+    res.json(listSchedules());
+  } catch (error) {
+    sendSchedulerError(res, error);
+  }
+});
+
+// Create a one-time schedule
+app.post("/schedules/one-time", (req: Request, res: Response) => {
+  const body = req.body;
+  if (!isJsonObject(body)) {
+    res.status(400).json({ error: "Request body must be a JSON object" });
+    return;
+  }
+
+  const { runAt, payload } = body;
+  if (typeof runAt !== "string" || runAt.trim().length === 0) {
+    res.status(400).json({ error: "Missing 'runAt' in request body" });
+    return;
+  }
+
+  if (!isJsonValue(payload)) {
+    res.status(400).json({ error: "Missing or invalid 'payload' in request body" });
+    return;
+  }
+
+  try {
+    const schedule = scheduleOneTime(runAt, payload);
+    res.status(201).json({ schedule });
+  } catch (error) {
+    sendSchedulerError(res, error);
+  }
+});
+
+// Create a recurring schedule
+app.post("/schedules/recurring", (req: Request, res: Response) => {
+  const body = req.body;
+  if (!isJsonObject(body)) {
+    res.status(400).json({ error: "Request body must be a JSON object" });
+    return;
+  }
+
+  const { cron, payload } = body;
+  if (typeof cron !== "string" || cron.trim().length === 0) {
+    res.status(400).json({ error: "Missing 'cron' in request body" });
+    return;
+  }
+
+  if (!isJsonValue(payload)) {
+    res.status(400).json({ error: "Missing or invalid 'payload' in request body" });
+    return;
+  }
+
+  try {
+    const schedule = scheduleRecurring(cron, payload);
+    res.status(201).json({ schedule });
+  } catch (error) {
+    sendSchedulerError(res, error);
+  }
+});
+
+// Trigger a specific schedule immediately
+app.post("/scheduler/run/:id", async (req: Request, res: Response) => {
+  const id = normalizeRouteParam(req.params.id);
+  if (!id) {
+    res.status(400).json({ error: "Missing schedule id in route" });
+    return;
+  }
+
+  try {
+    const run = await runScheduleNow(id);
+    const schedule = listSchedules().find((candidate) => candidate.id === id) ?? null;
+    res.json({ run, schedule });
+  } catch (error) {
+    sendSchedulerError(res, error);
+  }
+});
+
+// Run all due schedules immediately
+app.post("/scheduler/run-now", async (_req: Request, res: Response) => {
+  try {
+    const result = await runDueSchedulesNow();
+    res.json(result);
+  } catch (error) {
+    sendSchedulerError(res, error);
+  }
+});
+
+// Cancel a schedule
+app.post("/schedules/:id/cancel", (req: Request, res: Response) => {
+  const id = normalizeRouteParam(req.params.id);
+  if (!id) {
+    res.status(400).json({ error: "Missing schedule id in route" });
+    return;
+  }
+
+  try {
+    const schedule = cancelSchedule(id);
+    res.json({ schedule });
+  } catch (error) {
+    sendSchedulerError(res, error);
+  }
 });
 
 // SSE stream for real-time responses
@@ -316,4 +431,53 @@ export function broadcastToSSE(text: string): void {
       `data: ${JSON.stringify({ type: "message", content: text })}\n\n`
     );
   }
+}
+
+function normalizeRouteParam(param: string | string[] | undefined): string | undefined {
+  if (typeof param === "string" && param.trim().length > 0) {
+    return param.trim();
+  }
+  if (Array.isArray(param) && typeof param[0] === "string" && param[0].trim().length > 0) {
+    return param[0].trim();
+  }
+  return undefined;
+}
+
+function sendSchedulerError(res: Response, error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  if (error instanceof TypeError) {
+    res.status(400).json({ error: message });
+    return;
+  }
+  if (message.startsWith("Schedule not found:")) {
+    res.status(404).json({ error: message });
+    return;
+  }
+  if (message.startsWith("Schedule is already running:") || message.startsWith("Schedule is not schedulable:")) {
+    res.status(409).json({ error: message });
+    return;
+  }
+  res.status(500).json({ error: message });
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isJsonValue(value: unknown): value is JsonValue {
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  ) {
+    return true;
+  }
+  if (Array.isArray(value)) {
+    return value.every((item) => isJsonValue(item));
+  }
+  if (!isJsonObject(value)) {
+    return false;
+  }
+  return Object.values(value).every((item) => isJsonValue(item));
 }
