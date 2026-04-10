@@ -12,7 +12,7 @@
   ],
   "scripts": {
     "build": "tsc",
-    "test": "npm run build && node --test dist/commands/*.test.js",
+    "test": "npm run build && node --test --test-concurrency=1 $(find dist -name '*.test.js' -print)",
     "daemon": "tsx src/daemon.ts",
     "tui": "tsx src/tui/index.ts",
     "dev": "tsx --watch src/daemon.ts",
