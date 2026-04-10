@@ -26,6 +26,8 @@ export interface MaxHomeFixture {
   dbPath: string;
   apiTokenPath: string;
   sessionsDir: string;
+  sessionLogsDir: string;
+  activeRunIdPath: string;
   skillsDir: string;
   wikiDir: string;
   cleanup(): Promise<void>;
@@ -80,6 +82,8 @@ export function createMaxHomeFixture(
   const dbPath = join(maxHomeDir, "max.db");
   const apiTokenPath = join(maxHomeDir, "api-token");
   const sessionsDir = join(maxHomeDir, "sessions");
+  const sessionLogsDir = join(maxHomeDir, "session-logs");
+  const activeRunIdPath = join(sessionLogsDir, "current-run-id");
   const skillsDir = join(maxHomeDir, "skills");
   const wikiDir = join(maxHomeDir, "wiki");
 
@@ -94,6 +98,8 @@ export function createMaxHomeFixture(
     dbPath,
     apiTokenPath,
     sessionsDir,
+    sessionLogsDir,
+    activeRunIdPath,
     skillsDir,
     wikiDir,
     async cleanup(): Promise<void> {
