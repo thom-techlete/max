@@ -36,6 +36,10 @@ function formatWorkerError(workerName: string, startedAt: number, timeoutMs: num
   return `Worker '${workerName}' failed after ${elapsed}s: ${msg}`;
 }
 
+function logWorker(message: string): void {
+  console.log(`[max][worker] ${message}`);
+}
+
 const BLOCKED_WORKER_DIRS = [
   ".ssh", ".gnupg", ".aws", ".azure", ".config/gcloud",
   ".kube", ".docker", ".npmrc", ".pypirc",
@@ -71,17 +75,6 @@ type NamedAgent = {
   displayName?: string;
 };
 
-function selectCustomAgent(agentName: string | undefined, customAgents: NamedAgent[]): NamedAgent | undefined {
-  if (!agentName) {
-    return undefined;
-  }
-
-  const wanted = agentName.trim().toLowerCase();
-  return customAgents.find((agent) =>
-    agent.name?.toLowerCase() === wanted || agent.displayName?.toLowerCase() === wanted
-  );
-}
-
 export function createTools(deps: ToolDeps): Tool<any>[] {
   return [
     defineTool("create_worker_session", {
@@ -97,6 +90,7 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
         skill_directories: z.array(z.string()).optional().describe("Optional array of skill directory paths to load into the worker session"),
       }),
       handler: async (args) => {
+        logWorker(`create_worker_session called: name=${args.name}, working_dir=${args.working_dir}, model=${args.model ?? "(default)"}, skill_directories=${Array.isArray(args.skill_directories) ? args.skill_directories.length : 0}, initial_prompt=${args.initial_prompt ? "yes" : "no"}`);
         if (deps.workers.has(args.name)) {
           return `Worker '${args.name}' already exists. Use send_to_worker to interact with it.`;
         }
@@ -116,6 +110,7 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
         }
 
         const skillDirs: string[] = Array.isArray(args.skill_directories) ? [...args.skill_directories] : [];
+        logWorker(`initial skillDirs count=${skillDirs.length}`);
 
         // Load agents from agents/ folder in the working directory or parent directories
         let agentsFolderPath: string | null = null;
@@ -134,6 +129,7 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
         // Load all agents from agents/ by reading their agent.json files
         const customAgents: any[] = [];
         if (agentsFolderPath) {
+          logWorker(`found agents folder at ${agentsFolderPath}`);
           try {
             const agentDirs = readdirSync(agentsFolderPath);
             for (const agentFile of agentDirs) {
@@ -180,15 +176,24 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
         const workerAgent = "orchestrator"
         const createdAt = Date.now();
 
-        const session = await deps.client.createSession({
-          model: sessionModel,
-          configDir: SESSIONS_DIR,
-          workingDirectory: args.working_dir,
-          skillDirectories: skillDirs.length ? skillDirs : undefined,
-          customAgents: availableCustomAgents,
-          agent: workerAgent,
-          onPermissionRequest: approveAll,
-        });
+        logWorker(`creating session: model=${sessionModel}, workingDirectory=${args.working_dir}, skillDirectories=${skillDirs.length}, customAgents=${availableCustomAgents.length}, agent=${workerAgent}`);
+        let session: CopilotSession;
+        try {
+          session = await deps.client.createSession({
+            model: sessionModel,
+            configDir: SESSIONS_DIR,
+            workingDirectory: args.working_dir,
+            skillDirectories: skillDirs.length ? skillDirs : undefined,
+            customAgents: availableCustomAgents,
+            agent: workerAgent,
+            onPermissionRequest: approveAll,
+          });
+          logWorker(`create_session succeeded: ${session.sessionId}`);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          logWorker(`create_session failed: ${msg}`);
+          throw err;
+        }
 
         const worker: WorkerInfo = {
           name: args.name,
@@ -225,13 +230,16 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
           if (args.skill_directories && Array.isArray(args.skill_directories)) {
             promptPayload.skillDirectories = args.skill_directories;
           }
+          logWorker(`dispatching initial prompt to worker '${args.name}', timeoutMs=${timeoutMs}`);
 
           session.sendAndWait(promptPayload, timeoutMs).then((result) => {
             worker.lastOutput = result?.data?.content || "No response";
+            logWorker(`worker '${args.name}' completed initial prompt successfully`);
             deps.onWorkerComplete(args.name, worker.lastOutput);
           }).catch((err) => {
             const errMsg = formatWorkerError(args.name, worker.startedAt!, timeoutMs, err);
             worker.lastOutput = errMsg;
+            logWorker(`worker '${args.name}' failed initial prompt: ${errMsg}`);
             deps.onWorkerComplete(args.name, errMsg);
           }).finally(() => {
             // Auto-destroy background workers after completion to free memory (~400MB per worker)
@@ -256,6 +264,7 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
         prompt: z.string().describe("The prompt to send"),
       }),
       handler: async (args) => {
+        logWorker(`send_to_worker called: name=${args.name}`);
         const worker = deps.workers.get(args.name);
         if (!worker) {
           return `No worker named '${args.name}'. Use list_sessions to see available workers.`;
@@ -274,13 +283,16 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
         );
 
         const timeoutMs = config.workerTimeoutMs;
+        logWorker(`dispatching prompt to worker '${args.name}', timeoutMs=${timeoutMs}`);
         // Non-blocking: dispatch work and return immediately
         worker.session.sendAndWait({ prompt: args.prompt }, timeoutMs).then((result) => {
           worker.lastOutput = result?.data?.content || "No response";
+          logWorker(`worker '${args.name}' completed send_to_worker prompt successfully`);
           deps.onWorkerComplete(args.name, worker.lastOutput);
         }).catch((err) => {
           const errMsg = formatWorkerError(args.name, worker.startedAt!, timeoutMs, err);
           worker.lastOutput = errMsg;
+          logWorker(`worker '${args.name}' failed send_to_worker prompt: ${errMsg}`);
           deps.onWorkerComplete(args.name, errMsg);
         }).finally(() => {
           // Auto-destroy after each send_to_worker dispatch to free memory
@@ -418,6 +430,7 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
         name: z.string().describe("A short name to reference this session by, e.g. 'vscode-main'"),
       }),
       handler: async (args) => {
+        logWorker(`attach_machine_session called: name=${args.name}, session_id=${args.session_id}`);
         if (deps.workers.has(args.name)) {
           return `A worker named '${args.name}' already exists. Choose a different name.`;
         }
@@ -427,6 +440,7 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
             model: config.copilotModel,
             onPermissionRequest: approveAll,
           });
+          logWorker(`attach_machine_session succeeded: name=${args.name}, session_id=${args.session_id}`);
 
           const worker: WorkerInfo = {
             name: args.name,
