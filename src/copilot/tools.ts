@@ -65,6 +65,8 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
         name: z.string().describe("Short descriptive name for the session, e.g. 'auth-fix'"),
         working_dir: z.string().describe("Absolute path to the directory to work in"),
         initial_prompt: z.string().optional().describe("Optional initial prompt to send to the worker"),
+        model: z.string().optional().describe("Optional model override for the worker session"),
+        skill_directories: z.array(z.string()).optional().describe("Optional array of skill directory paths to load into the worker session"),
       }),
       handler: async (args) => {
         if (deps.workers.has(args.name)) {
@@ -86,9 +88,10 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
         }
 
         const session = await deps.client.createSession({
-          model: config.copilotModel,
+          model: args.model || config.copilotModel,
           configDir: SESSIONS_DIR,
           workingDirectory: args.working_dir,
+          skillDirectories: args.skill_directories || undefined,
           onPermissionRequest: approveAll,
         });
 
@@ -117,9 +120,12 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
 
           const timeoutMs = config.workerTimeoutMs;
           // Non-blocking: dispatch work and return immediately
-          session.sendAndWait({
-            prompt: `Working directory: ${args.working_dir}\n\n${args.initial_prompt}`,
-          }, timeoutMs).then((result) => {
+          const promptPayload: any = { prompt: `Working directory: ${args.working_dir}\n\n${args.initial_prompt}` };
+          if (args.skill_directories && Array.isArray(args.skill_directories)) {
+            promptPayload.skillDirectories = args.skill_directories;
+          }
+
+          session.sendAndWait(promptPayload, timeoutMs).then((result) => {
             worker.lastOutput = result?.data?.content || "No response";
             deps.onWorkerComplete(args.name, worker.lastOutput);
           }).catch((err) => {
