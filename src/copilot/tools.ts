@@ -67,6 +67,8 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
         initial_prompt: z.string().optional().describe("Optional initial prompt to send to the worker"),
         model: z.string().optional().describe("Optional model override for the worker session"),
         skill_directories: z.array(z.string()).optional().describe("Optional array of skill directory paths to load into the worker session"),
+        custom_agents: z.array(z.any()).optional().describe("Optional array of custom agent manifests to load into the worker"),
+        agent: z.string().optional().describe("Optional agent role to use for the session, e.g. 'orchestrator'"),
       }),
       handler: async (args) => {
         if (deps.workers.has(args.name)) {
@@ -87,11 +89,52 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
           return `Worker limit reached (${MAX_CONCURRENT_WORKERS}). Active: ${names}. Kill a session first.`;
         }
 
+        const globalAgentsBase = join(homedir(), ".copilot", "agents");
+        const requiredAgents = ["orchestrator", "coder", "designer", "planner"];
+        const skillDirs: string[] = Array.isArray(args.skill_directories) ? [...args.skill_directories] : [];
+        for (const a of requiredAgents) {
+          const p = join(globalAgentsBase, a);
+          try {
+            if (statSync(p).isDirectory() && !skillDirs.includes(p)) skillDirs.push(p);
+          } catch {
+            // ignore missing agent dir
+          }
+        }
+
+        // Build customAgents from available global agent dirs or fall back to sensible defaults
+        const customAgents: any[] = [];
+        for (const a of requiredAgents) {
+          const agentDir = join(globalAgentsBase, a);
+          try {
+            // Prefer an agent.json manifest with explicit fields
+            const jsonPath = join(agentDir, "agent.json");
+            try {
+              const raw = readFileSync(jsonPath, "utf-8");
+              const parsed = JSON.parse(raw);
+              // Ensure name field exists
+              if (parsed.name) {
+                customAgents.push(parsed);
+                continue;
+              }
+            } catch {
+              // fallthrough to defaults
+            }
+          } catch {}
+
+          // Fallback defaults for agents
+          const nice = a.charAt(0).toUpperCase() + a.slice(1);
+          const defaultDesc = `${nice} agent: specialized for ${a === 'orchestrator' ? 'coordinating work across specialists' : a + ' tasks' }.`;
+          const defaultPrompt = `You are the ${nice} agent. Assist with ${a === 'orchestrator' ? 'orchestration and delegation' : a + ' responsibilities'}. Follow instructions concisely and act as the ${nice} specialist.`;
+          customAgents.push({ name: a, description: defaultDesc, prompt: defaultPrompt, infer: true });
+        }
+
         const session = await deps.client.createSession({
           model: args.model || config.copilotModel,
           configDir: SESSIONS_DIR,
           workingDirectory: args.working_dir,
-          skillDirectories: args.skill_directories || undefined,
+          skillDirectories: skillDirs.length ? skillDirs : undefined,
+          customAgents: args.custom_agents && Array.isArray(args.custom_agents) && args.custom_agents.length ? args.custom_agents : customAgents,
+          agent: args.agent || "orchestrator",
           onPermissionRequest: approveAll,
         });
 
