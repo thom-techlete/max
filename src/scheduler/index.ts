@@ -1,5 +1,9 @@
 import { randomUUID } from "crypto";
 import { CronExpressionParser } from "cron-parser";
+import { getClient } from "../copilot/client.js";
+import { createWorkerSession, logWorker } from "../copilot/worker-helper.js";
+import { getWorkers } from "../copilot/orchestrator.js";
+import { config } from "../config.js";
 import { getSchedulerDb } from "../store/scheduler-db.js";
 import type {
   JsonValue,
@@ -16,6 +20,8 @@ import type {
 
 const DEFAULT_TIMEZONE = "UTC";
 const DEFAULT_OVERLAP_POLICY = "forbid";
+const DEFAULT_SCHEDULED_TASK_TYPE = "worker-task";
+const RESEARCH_TASK_DEFAULT_MODEL = "gpt-5-mini";
 
 interface ScheduledTaskRow {
   id: string;
@@ -48,6 +54,30 @@ interface ScheduledTaskRunRow {
   error: string | null;
   external_run_id: string | null;
   runner_result_json: string | null;
+}
+
+interface ScheduledWorkerPayload {
+  taskType?: JsonValue;
+  task_type?: JsonValue;
+  name?: JsonValue;
+  workingDir?: JsonValue;
+  working_dir?: JsonValue;
+  cwd?: JsonValue;
+  prompt?: JsonValue;
+  initialPrompt?: JsonValue;
+  initial_prompt?: JsonValue;
+  model?: JsonValue;
+  skillDirectories?: JsonValue;
+  skill_directories?: JsonValue;
+}
+
+interface NormalizedScheduledWorkerPayload {
+  taskType: string;
+  name: string;
+  workingDir: string;
+  initialPrompt: string;
+  model?: string;
+  skillDirectories?: string[];
 }
 
 export function scheduleOneTime<TPayload extends SchedulePayload>(
@@ -186,7 +216,7 @@ export async function runDueSchedulesNow<TPayload extends SchedulePayload>(
   }
 
   const evaluatedAtISO = evaluatedAt.toISOString();
-  const runner = options.runner ?? createPlaceholderRunner<TPayload>();
+  const runner = options.runner ?? createWorkerScheduleRunner<TPayload>();
 
   const dueRows = db.prepare(`
     SELECT
@@ -606,11 +636,172 @@ function defaultErrorForStatus(status: "succeeded" | "failed" | "skipped"): stri
   return "";
 }
 
-function createPlaceholderRunner<TPayload extends SchedulePayload>(): ScheduleRunner<TPayload> {
-  return () => ({
-    status: "skipped",
-    error: "No scheduler runner has been configured yet.",
+function createWorkerScheduleRunner<TPayload extends SchedulePayload>(): ScheduleRunner<TPayload> {
+  return async (schedule, context) => {
+    const payload = normalizeScheduledWorkerPayload(schedule, context.runId);
+    const model = resolveScheduledModel(payload);
+
+    logWorker(
+      `scheduler dispatching schedule='${schedule.id}' run='${context.runId}' worker='${payload.name}' model='${model}' dir='${payload.workingDir}'`,
+    );
+
+    const result = await createWorkerSession(
+      {
+        name: payload.name,
+        workingDir: payload.workingDir,
+        initialPrompt: payload.initialPrompt,
+        model,
+        skillDirectories: payload.skillDirectories,
+      },
+      {
+        client: await getClient(),
+        workers: getWorkers(),
+        onWorkerComplete: (workerName, output) => {
+          logWorker(
+            `scheduler worker '${workerName}' finished for schedule '${schedule.id}': ${truncateForLog(output)}`,
+          );
+        },
+        logWorker,
+      },
+    );
+
+    if (!result.created) {
+      const runnerResult: Record<string, JsonValue> = {
+        workerName: payload.name,
+        model,
+        taskType: payload.taskType,
+      };
+      return {
+        status: "failed",
+        error: result.message,
+        result: runnerResult,
+      };
+    }
+
+    const runnerResult: Record<string, JsonValue> = {
+      workerName: result.worker.name,
+      sessionId: result.sessionId,
+      dispatchedInitialPrompt: result.dispatchedInitialPrompt,
+      model,
+      taskType: payload.taskType,
+      workingDir: payload.workingDir,
+    };
+
+    return {
+      status: "succeeded",
+      externalRunId: result.sessionId,
+      result: runnerResult,
+    };
+  };
+}
+
+function normalizeScheduledWorkerPayload<TPayload extends SchedulePayload>(
+  schedule: ScheduleRecord<TPayload>,
+  runId: string,
+): NormalizedScheduledWorkerPayload {
+  if (!isJsonObject(schedule.payload)) {
+    throw new TypeError(`Schedule ${schedule.id} payload must be a JSON object.`);
+  }
+
+  const payload = schedule.payload as ScheduledWorkerPayload;
+  const taskType = readRequiredOrDefaultString(
+    payload.taskType ?? payload.task_type,
+    DEFAULT_SCHEDULED_TASK_TYPE,
+  );
+  const workingDir = readRequiredString(
+    payload.workingDir ?? payload.working_dir ?? payload.cwd,
+    `Schedule ${schedule.id} payload must include 'workingDir' (or 'working_dir'/'cwd').`,
+  );
+  const initialPrompt = readRequiredString(
+    payload.initialPrompt ?? payload.initial_prompt ?? payload.prompt,
+    `Schedule ${schedule.id} payload must include 'initialPrompt' (or 'initial_prompt'/'prompt').`,
+  );
+  const explicitName = readOptionalString(payload.name);
+  const model = readOptionalString(payload.model);
+  const skillDirectories = readOptionalStringArray(
+    payload.skillDirectories ?? payload.skill_directories,
+    "skillDirectories",
+  );
+
+  return {
+    taskType,
+    name: explicitName ?? buildScheduledWorkerName(taskType, schedule.id, runId),
+    workingDir,
+    initialPrompt,
+    model,
+    skillDirectories,
+  };
+}
+
+function resolveScheduledModel(payload: NormalizedScheduledWorkerPayload): string {
+  if (payload.model) {
+    return payload.model;
+  }
+  if (config.schedulerModelOverride) {
+    return config.schedulerModelOverride;
+  }
+  if (payload.taskType === "research-task") {
+    return RESEARCH_TASK_DEFAULT_MODEL;
+  }
+  return config.copilotModel;
+}
+
+function buildScheduledWorkerName(taskType: string, scheduleId: string, runId: string): string {
+  const taskPrefix = taskType
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 24) || "scheduled-task";
+  return `${taskPrefix}-${scheduleId.slice(0, 8)}-${runId.slice(0, 8)}`;
+}
+
+function readRequiredOrDefaultString(value: JsonValue | undefined, fallback: string): string {
+  const parsed = readOptionalString(value);
+  return parsed ?? fallback;
+}
+
+function readRequiredString(value: JsonValue | undefined, errorMessage: string): string {
+  const parsed = readOptionalString(value);
+  if (!parsed) {
+    throw new TypeError(errorMessage);
+  }
+  return parsed;
+}
+
+function readOptionalString(value: JsonValue | undefined): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function readOptionalStringArray(
+  value: JsonValue | undefined,
+  fieldName: string,
+): string[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (!Array.isArray(value)) {
+    throw new TypeError(`${fieldName} must be an array of strings.`);
+  }
+
+  const normalized = value.map((item) => {
+    if (typeof item !== "string" || item.trim().length === 0) {
+      throw new TypeError(`${fieldName} must be an array of non-empty strings.`);
+    }
+    return item.trim();
   });
+
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function truncateForLog(text: string, max = 200): string {
+  const oneLine = text.replace(/\n/g, " ").trim();
+  return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
 }
 
 function formatError(error: unknown): string {
@@ -639,4 +830,8 @@ function isJsonValue(value: unknown): value is JsonValue {
   }
 
   return Object.values(value as Record<string, unknown>).every((item) => isJsonValue(item));
+}
+
+function isJsonObject(value: JsonValue): value is Record<string, JsonValue> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

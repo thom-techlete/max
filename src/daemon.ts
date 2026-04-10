@@ -3,16 +3,66 @@ import { initOrchestrator, setMessageLogger, setProactiveNotify, getWorkers } fr
 import { startApiServer, broadcastToSSE } from "./api/server.js";
 import { createBot, startBot, stopBot, sendProactiveMessage } from "./telegram/bot.js";
 import { getDb, closeDb } from "./store/db.js";
+import { closeSchedulerDb } from "./store/scheduler-db.js";
 import { config } from "./config.js";
 import { spawn } from "child_process";
 import { checkForUpdate } from "./update.js";
 import { ensureWikiStructure } from "./wiki/fs.js";
 import { shouldMigrate, migrateMemoriesToWiki } from "./wiki/migrate.js";
 import { getSessionLogPath } from "./logging/session-log.js";
+import { runDueSchedulesNow } from "./scheduler/index.js";
 
 function truncate(text: string, max = 200): string {
   const oneLine = text.replace(/\n/g, " ").trim();
   return oneLine.length > max ? oneLine.slice(0, max) + "…" : oneLine;
+}
+
+let schedulerPollTimer: ReturnType<typeof setInterval> | undefined;
+let schedulerPollInFlight = false;
+
+async function pollScheduler(trigger: "startup" | "interval"): Promise<void> {
+  if (schedulerPollInFlight) {
+    console.log(`[max] Scheduler poll skipped (${trigger}) — previous run still active`);
+    return;
+  }
+
+  schedulerPollInFlight = true;
+  try {
+    const result = await runDueSchedulesNow();
+    if (result.dueCount === 0) {
+      if (trigger === "startup") {
+        console.log("[max] Scheduler startup check complete — no due schedules");
+      }
+      return;
+    }
+
+    console.log(
+      `[max] Scheduler ${trigger} check: due=${result.dueCount}, dispatched=${result.dispatchedCount}, blocked=${result.blockedCount}, completed=${result.completedCount}, failed=${result.failedCount}, skipped=${result.skippedCount}`,
+    );
+  } catch (err) {
+    console.error(`[max] Scheduler poll failed (${trigger}):`, err instanceof Error ? err.message : err);
+  } finally {
+    schedulerPollInFlight = false;
+  }
+}
+
+async function startSchedulerLoop(): Promise<void> {
+  console.log(`[max] Scheduler polling every ${config.schedulerPollIntervalMs}ms`);
+  await pollScheduler("startup");
+
+  schedulerPollTimer = setInterval(() => {
+    void pollScheduler("interval");
+  }, config.schedulerPollIntervalMs);
+  schedulerPollTimer.unref();
+}
+
+function stopSchedulerLoop(): void {
+  if (!schedulerPollTimer) {
+    return;
+  }
+
+  clearInterval(schedulerPollTimer);
+  schedulerPollTimer = undefined;
 }
 
 async function main(): Promise<void> {
@@ -83,6 +133,7 @@ async function main(): Promise<void> {
     console.log("[max] Telegram user ID missing — skipping bot. Run 'max setup' and enter your Telegram user ID (get it from @userinfobot).");
   }
 
+  await startSchedulerLoop();
   console.log("[max] Max is fully operational.");
 
   // Non-blocking update check
@@ -131,6 +182,8 @@ async function shutdown(): Promise<void> {
   }, 3000);
   forceTimer.unref();
 
+  stopSchedulerLoop();
+
   if (config.telegramEnabled) {
     try { await stopBot(); } catch { /* best effort */ }
   }
@@ -142,6 +195,7 @@ async function shutdown(): Promise<void> {
   workers.clear();
 
   try { await stopClient(); } catch { /* best effort */ }
+  closeSchedulerDb();
   closeDb();
   console.log("[max] Goodbye.");
   process.exit(0);
@@ -162,6 +216,8 @@ export async function restartDaemon(): Promise<void> {
     try { await stopBot(); } catch { /* best effort */ }
   }
 
+  stopSchedulerLoop();
+
   // Destroy all active worker sessions to free memory
   await Promise.allSettled(
     Array.from(activeWorkers.values()).map((w) => w.session.destroy())
@@ -169,6 +225,7 @@ export async function restartDaemon(): Promise<void> {
   activeWorkers.clear();
 
   try { await stopClient(); } catch { /* best effort */ }
+  closeSchedulerDb();
   closeDb();
 
   // Spawn a detached replacement process with the same args (include execArgv for tsx/loaders)
